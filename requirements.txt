@@ -1,0 +1,16 @@
+# BIFlow - installation : python -m venv .venv  puis  .venv\Scripts\python.exe -m pip install -r requirements.txt
+# Fichier .env requis (non versionné) :
+#   LLM_MODEL=google_genai:<modèle>
+#   GOOGLE_API_KEY=<clé>
+pandas==3.1.0
+numpy==2.5.4
+python-dotenv==1.2.4
+langchain==1.4.8
+langchain-core==1.7.4
+langgraph==1.2.19
+langchain-google-genai==4.4.2
+streamlit==1.66.1
+plotly==7.1.0
+scikit-learn==1.9.1
+shap==0.54.1
+joblib==1.6.0

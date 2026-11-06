@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+# Données volumineuses et sorties régénérables : non versionnées
+data/*
+# ... sauf les décisions humaines (traçabilité de la validation)
+!data/validated_translations.json
+!data/human_review_log.json
+
+.pytest_cache/

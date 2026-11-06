@@ -1,0 +1,24 @@
+[
+  {
+    "reviewer": "mouadh",
+    "at": "2026-10-29T18:25:31",
+    "changes": [
+      {
+        "category": "portateis_cozinha_e_preparadores_de_alimentos",
+        "decision": "Approuvé",
+        "proposed_by_agent": "kitchen_portables_and_food_preparers",
+        "final_translation": "kitchen_portables_and_food_preparers",
+        "edited_by_human": false,
+        "agent_confidence": "high"
+      },
+      {
+        "category": "pc_gamer",
+        "decision": "Approuvé",
+        "proposed_by_agent": "pc_gamer",
+        "final_translation": "pc_gamer",
+        "edited_by_human": false,
+        "agent_confidence": "high"
+      }
+    ]
+  }
+]

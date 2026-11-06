@@ -1,0 +1,29 @@
+{
+  "brl_to_tnd": 0.62,
+  "brl_to_tnd_date": "A_COMPLETER",
+  "cost_source": "production_cost",
+  "default_cost_pct": 0.7,
+  "cost_pct_by_category": {
+    "telephony": 0.75,
+    "computers": 0.8,
+    "computers_accessories": 0.65,
+    "electronics": 0.72
+  },
+  "electronics_categories": [
+    "telephony",
+    "fixed_telephony",
+    "computers",
+    "computers_accessories",
+    "electronics",
+    "tablets_printing_image",
+    "audio",
+    "pc_gamer"
+  ],
+  "revenue_statuses": [
+    "delivered"
+  ],
+  "translation_overrides": {
+    "pc_gamer": "pc_gamer",
+    "portateis_cozinha_e_preparadores_de_alimentos": "portable_kitchen_and_food_preparers"
+  }
+}
