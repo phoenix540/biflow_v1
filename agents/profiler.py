@@ -1,11 +1,39 @@
 import json
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
-RAW_DIR = ROOT / "data" / "raw" / "olist"
+IGNORED_RAW_DIRS = {"backup", "backups", "archive", "old", "tmp"}
+
+
+def find_raw_dir(root: Path = ROOT) -> Path:
+    """Dossier des CSV bruts, partagé par le Profiler et l'ETL générique :
+    --data-dir=chemin, sinon BIFLOW_RAW_DIR, sinon le sous-dossier de data/raw qui contient le plus de CSV
+    (les copies de sauvegarde sont ignorées), sinon data/raw lui-même."""
+    for a in sys.argv:
+        if a.startswith("--data-dir="):
+            return Path(a.split("=", 1)[1])
+    if os.environ.get("BIFLOW_RAW_DIR"):
+        return Path(os.environ["BIFLOW_RAW_DIR"])
+    base = root / "data" / "raw"
+    if base.exists():
+        subs = [d for d in sorted(base.iterdir()) if d.is_dir() and any(d.glob("*.csv"))
+                and d.name.lower() not in IGNORED_RAW_DIRS]
+        if subs:
+            return max(subs, key=lambda d: len(list(d.glob("*.csv"))))
+        if any(base.glob("*.csv")):
+            return base
+    raise FileNotFoundError("Aucun CSV trouvé : utiliser --data-dir=chemin ou BIFLOW_RAW_DIR")
+
+
+try:
+    RAW_DIR = find_raw_dir()
+except FileNotFoundError:
+    RAW_DIR = ROOT / "data" / "raw" / "olist"
 OUT_DIR = ROOT / "data" / "profile"
 PROFILE_PATH = OUT_DIR / "profile.json"
 
@@ -292,8 +320,13 @@ def business_rules(tables: dict) -> list:
 # 4. État des traductions de catégories
 # ----------------------------------------------------------------------------
 def category_translation_status(raw_dir=RAW_DIR) -> dict:
-    p = pd.read_csv(Path(raw_dir) / "olist_products_dataset.csv", usecols=["product_category_name"])
-    t = pd.read_csv(Path(raw_dir) / "product_category_name_translation.csv")
+    """Catégories Olist sans traduction anglaise (sans objet pour un autre jeu de données)."""
+    pf, tf = Path(raw_dir) / "olist_products_dataset.csv", Path(raw_dir) / "product_category_name_translation.csv"
+    if not (pf.exists() and tf.exists()):
+        return {"available": False, "reason": "pas de table de traduction des catégories dans ce jeu de données",
+                "untranslated_categories": {}}
+    p = pd.read_csv(pf, usecols=["product_category_name"])
+    t = pd.read_csv(tf)
     cat = p["product_category_name"]
     present = cat.dropna()
     untranslated = present[~present.isin(set(t["product_category_name"]))]

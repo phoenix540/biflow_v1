@@ -117,7 +117,7 @@ def load_store() -> Store:
     o["customer_state"] = o["customer_state"].fillna("NA")
 
     s = pd.read_csv(CUR / "fact_sales.csv", usecols=[
-        "order_id", "product_name", "seller_id", "seller_name", "customer_state", "seller_state", "category",
+        "order_id", "product_id", "product_name", "seller_id", "seller_name", "customer_state", "seller_state", "category",
         "purchase_date", "is_revenue_order", "price", "freight_value", "revenue_brl", "margin_brl"])
     s = s[_bool(s["is_revenue_order"])].copy()
     s["purchase_date"] = pd.to_datetime(s["purchase_date"], errors="coerce")

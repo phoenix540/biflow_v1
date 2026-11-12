@@ -22,7 +22,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 CURATED = ROOT / "data" / "curated"
-ETL_DECISION = ROOT / "data" / "etl" / "etl_agent_decision.json"
+ETL_DECISION = ROOT / "data" / "etl" / "olist_model_decision.json"   # configuration métier (taux BRL->TND)
 PROFILE_PATH = ROOT / "data" / "profile" / "profile.json"
 KPI_PATH = ROOT / "data" / "kpi" / "kpi_results.json"
 ANALYST_PATH = ROOT / "data" / "analyst" / "analyst_insights.json"
@@ -56,7 +56,7 @@ KPI_DEFINITIONS = [
 def _read(name: str, **kw) -> pd.DataFrame:
     path = CURATED / name
     if not path.exists():
-        raise FileNotFoundError(f"Fichier manquant : {path} (l'agent ETL a-t-il tourné ?)")
+        raise FileNotFoundError(f"Fichier manquant : {path} (le modèle métier Olist, olist_model_agent, a-t-il tourné ?)")
     return pd.read_csv(path, **kw)
 
 

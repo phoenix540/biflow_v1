@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pandas as pd
 
-import etl_agent
+import olist_model_agent
 import profiler
 
 
@@ -43,13 +43,13 @@ def _orders(delivered, estimated, status="delivered"):
 
 def test_delivery_on_promised_day_is_not_late():
     # Bug corrigé : livré le jour promis à 15 h ne doit pas compter en retard
-    o = etl_agent.tool_clean_orders(_orders("2017-10-05 15:00:00", "2017-10-05 00:00:00"),
+    o = olist_model_agent.tool_clean_orders(_orders("2017-10-05 15:00:00", "2017-10-05 00:00:00"),
                                     {"revenue_statuses": ["delivered"]}, Log())
     assert bool(o.loc[0, "is_late"]) is False and o.loc[0, "delay_days"] == 0
 
 
 def test_delivery_one_day_after_is_late():
-    o = etl_agent.tool_clean_orders(_orders("2017-10-06 08:00:00", "2017-10-05 00:00:00"),
+    o = olist_model_agent.tool_clean_orders(_orders("2017-10-06 08:00:00", "2017-10-05 00:00:00"),
                                     {"revenue_statuses": ["delivered"]}, Log())
     assert bool(o.loc[0, "is_late"]) is True and o.loc[0, "delay_days"] == 1
 
@@ -59,9 +59,9 @@ def test_human_translation_overrides_config(tmp_path, monkeypatch):
     cfg.write_text(json.dumps({"translation_overrides": {"pc_gamer": "from_config"}}), encoding="utf-8")
     human = tmp_path / "validated.json"
     human.write_text(json.dumps({"translations": {"pc_gamer": "from_human"}, "rejected": []}), encoding="utf-8")
-    monkeypatch.setattr(etl_agent, "CONFIG_PATH", cfg)
-    monkeypatch.setattr(etl_agent, "VALIDATED", human)
-    assert etl_agent.load_config()["approved_translations"]["pc_gamer"] == "from_human"
+    monkeypatch.setattr(olist_model_agent, "CONFIG_PATH", cfg)
+    monkeypatch.setattr(olist_model_agent, "VALIDATED", human)
+    assert olist_model_agent.load_config()["approved_translations"]["pc_gamer"] == "from_human"
 
 
 def test_sales_use_production_cost_with_fallback():
@@ -74,7 +74,7 @@ def test_sales_use_production_cost_with_fallback():
                              "production_cost_brl": [60.0, np.nan]})
     sellers = pd.DataFrame({"seller_id": ["s1"], "seller_name": ["Shop"], "seller_state": ["SP"]})
     cfg = {"cost_source": "production_cost", "default_cost_pct": 0.7, "cost_pct_by_category": {}, "brl_to_tnd": 1}
-    f = etl_agent.tool_build_sales(items, orders, products, sellers, cfg, Log())
+    f = olist_model_agent.tool_build_sales(items, orders, products, sellers, cfg, Log())
     assert list(f["cost_brl"]) == [60.0, 70.0]                       # coût réel, puis repli 70 %
     assert list(f["cost_source"]) == ["production_cost", "estimated_pct"]
     assert list(f["margin_brl"]) == [40.0, 30.0]

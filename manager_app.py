@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from manager import agents_bridge as B
 from manager import assistant as A
+from manager import insights as I
 from manager import metrics as M
 
 warnings.filterwarnings("ignore", message=".*fixed sampling defaults.*")
@@ -119,6 +120,20 @@ def c_scorecard(sc):
     return M.seller_scorecard(store, sc)
 
 
+@st.cache_resource(show_spinner="Chargement des produits et de la géolocalisation…")
+def get_extra():
+    return I.load_extra()
+
+
+@st.cache_data(show_spinner=False)
+def c_insight(name, sc, *args):
+    """Appel mis en cache d'une analyse de manager/insights.py (les fonctions « produits » et « carte »
+    reçoivent en plus les dimensions chargées par get_extra)."""
+    fn = getattr(I, name)
+    needs_extra = name in {"pareto", "best_sellers", "listing_quality", "weight_vs_freight", "sales_points"}
+    return fn(store, get_extra(), sc, *args) if needs_extra else fn(store, sc, *args)
+
+
 store = get_store()
 MONTHS = store.all_months
 
@@ -127,10 +142,12 @@ with st.sidebar:
     st.caption("Le cockpit des équipes Olist")
     st.markdown("**Périmètre d'analyse**")
     per = st.session_state.get("period")
-    if not (isinstance(per, (tuple, list)) and len(per) == 2 and all(p in MONTHS for p in per)):
-        # état absent ou abîmé (rechargement, changement de page) : on repart de la période par défaut
-        st.session_state["period"] = (store.default_start, store.last_full_month)
-    start, end = st.select_slider("Période", options=MONTHS, key="period", format_func=M.month_label)
+    if per is not None and not (isinstance(per, (tuple, list)) and len(per) == 2 and all(p in MONTHS for p in per)):
+        # état abîmé (données rechargées avec d'autres mois) : on l'efface, le curseur reprend sa valeur par défaut.
+        # Ne pas écrire la valeur par défaut dans session_state : le curseur resterait bloqué sur cette période.
+        del st.session_state["period"]
+    start, end = st.select_slider("Période", options=MONTHS, key="period", format_func=M.month_label,
+                                  value=(store.default_start, store.last_full_month))
     states_all = sorted(store.orders["customer_state"].unique())
     cats_all = sorted(store.sales["category"].unique())
     sel_states = st.multiselect("États clients", states_all, key="states", placeholder="Tous les États")
@@ -426,10 +443,348 @@ def page_scenarios():
 
 
 # --------------------------------------------------------------------------
+# PAGE : Clients et fidélisation
+# --------------------------------------------------------------------------
+SEG_COLORS = {"Champions": GOOD, "Fidèles à relancer": "#7cc3a0", "Nouveaux clients": BLUE,
+              "Gros paniers sans retour": WARN, "Endormis": "#a9b1c2", "Perdus": BAD}
+
+
+def page_customers():
+    page_head("Clients", "Clients et fidélisation", f"Périmètre : {SCOPE.label()}")
+    ov = c_insight("customers_overview", SCOPE)
+    c = st.columns(4)
+    c[0].metric("Clients uniques", M.fmt_num(ov["clients"]), border=True)
+    c[1].metric("Clients récurrents", M.fmt_pct(ov["taux_recurrents_pct"], 2), border=True,
+                help="Part des clients ayant passé au moins 2 commandes sur la période.")
+    c[2].metric("Part du CA des récurrents", M.fmt_pct(ov["part_ca_clients_recurrents_pct"]), border=True)
+    c[3].metric("Délai médian avant la 2e commande", f"{M.fmt_num(ov['delai_median_2e_commande_jours'])} jours", border=True)
+    callout(f"<b>Les clients reviennent très peu :</b> seulement {M.fmt_pct(ov['taux_recurrents_pct'], 1)} passent une "
+            f"2e commande, pour {M.fmt_pct(ov['part_ca_clients_recurrents_pct'])} du CA. La croissance d'Olist repose presque "
+            "entièrement sur l'acquisition : chaque point de fidélisation gagné est un levier majeur "
+            "(voir la page Scénarios).", "warn")
+
+    st.subheader("Rétention par cohorte")
+    co = c_insight("cohort_retention", SCOPE)
+    if co.empty:
+        st.info("Aucune cohorte sur ce périmètre.")
+    else:
+        cols = [k for k in co.columns if k.startswith("M+")]
+        z = co.set_index("cohorte")[cols]
+        z.index = [f"{M.month_label(m)} ({M.fmt_num(n)})" for m, n in zip(co["cohorte"], co["clients"])]
+        fig = px.imshow(z, color_continuous_scale=[[0, "#f4f6fa"], [1, BLUE]], aspect="auto", text_auto=".1f",
+                        labels=dict(x="Mois après le 1er achat", y="Cohorte (clients)", color="% revenus"))
+        fig.update_traces(hovertemplate="%{y}<br>%{x} : %{z:.2f} % ont recommandé<extra></extra>")
+        fig.update_layout(coloraxis_colorbar=dict(title="%", thickness=10))
+        show(style(fig, max(320, 24 * len(z))))
+        st.caption("Lecture : part cumulée des clients d'une cohorte (mois de leur 1er achat) ayant recommandé dans les "
+                   "k mois suivants. Cases vides : pas encore assez de recul. Filtres État et catégorie = ceux de la 1re commande.")
+
+    st.subheader("Segmentation RFM (récence, fréquence, montant)")
+    seg, _ = c_insight("rfm_segments", SCOPE)
+    if len(seg):
+        l, r = st.columns([1, 1.25], gap="large")
+        with l:
+            fig = px.bar(seg, x="part_clients_pct", y="segment", orientation="h", color="segment",
+                         color_discrete_map=SEG_COLORS, custom_data=["clients", "part_ca_pct"])
+            fig.update_traces(hovertemplate="<b>%{y}</b><br>%{customdata[0]:,} clients (%{x:.1f} %)<br>"
+                                            "%{customdata[1]:.1f} % du CA<extra></extra>")
+            fig.update_yaxes(autorange="reversed")
+            fig.update_xaxes(title="% des clients", ticksuffix=" %")
+            show(style(fig, 300))
+        with r:
+            st.dataframe(seg[["segment", "clients", "part_ca_pct", "panier_moyen", "recence_moyenne", "action"]],
+                         hide_index=True, column_config={
+                             "segment": "Segment", "clients": st.column_config.NumberColumn("Clients", format="localized"),
+                             "part_ca_pct": st.column_config.ProgressColumn("Part du CA", format="%.1f %%", min_value=0,
+                                                                            max_value=100),
+                             "panier_moyen": st.column_config.NumberColumn("Dépense moy.", format="%.0f BRL"),
+                             "recence_moyenne": st.column_config.NumberColumn("Dernier achat (j)", format="%.0f"),
+                             "action": "Action conseillée"})
+        st.caption("Règles : Champions = au moins 2 commandes et achat il y a moins de 6 mois ; Fidèles à relancer = "
+                   "2 commandes ou plus, plus anciennes ; Nouveaux = 1 commande de moins de 90 jours ; Gros paniers = "
+                   "1 commande dans les 20 % de dépenses les plus élevées ; Endormis = 1 commande de 3 à 12 mois ; "
+                   "Perdus = plus d'un an. Date de référence : fin de la période.")
+        big = seg.set_index("segment")
+        if "Gros paniers sans retour" in big.index:
+            g = big.loc["Gros paniers sans retour"]
+            callout(f"<b>Cible prioritaire :</b> les « gros paniers sans retour » sont {M.fmt_pct(g['part_clients_pct'], 0)} "
+                    f"des clients mais {M.fmt_pct(g['part_ca_pct'], 0)} du CA. Les faire revenir une seule fois pèserait plus "
+                    "que n'importe quel autre segment.")
+        if st.button("Quels segments de clients relancer en priorité ?", icon=":material/forum:"):
+            ask_assistant("Quels segments de clients relancer en priorité, et avec quelle action ?")
+
+    st.subheader("Fidélité selon l'État et la première catégorie achetée")
+    l, r = st.columns(2, gap="large")
+    for col, dim, title in ((l, "etat", "État du client"), (r, "categorie", "Catégorie de la 1re commande")):
+        with col:
+            d = c_insight("repeat_by", SCOPE, dim).head(12)
+            if d.empty:
+                st.info("Pas assez de clients (minimum 200 par groupe).")
+                continue
+            d["nom"] = d[dim].map(M.nice_cat)
+            fig = px.bar(d.iloc[::-1], x="taux_recurrents_pct", y="nom", orientation="h", custom_data=["clients"])
+            fig.update_traces(marker_color=BLUE, hovertemplate="<b>%{y}</b><br>%{x:.2f} % de récurrents<br>"
+                                                               "%{customdata[0]:,} clients<extra></extra>")
+            fig.update_xaxes(title=f"% de clients récurrents · {title}", ticksuffix=" %")
+            show(style(fig, 360), key=f"rep_{dim}")
+    st.caption("Groupes d'au moins 200 clients. Une catégorie qui fidélise mieux est un bon produit d'appel pour la 1re commande.")
+
+
+# --------------------------------------------------------------------------
+# PAGE : Paiements
+# --------------------------------------------------------------------------
+PAY_COLORS = {"Carte de crédit": BLUE, "Boleto": WARN, "Bon d'achat": GOOD, "Carte de débit": "#3b82a0",
+              "Non défini": GREY}
+
+
+def page_payments():
+    page_head("Paiements", "Moyens de paiement", f"Périmètre : {SCOPE.label()}")
+    mix = c_insight("payments_mix", SCOPE)
+    if mix.empty:
+        st.info("Aucune commande sur ce périmètre.")
+        return
+    by = mix.set_index("main_payment_type")
+    cc = by.loc["credit_card"] if "credit_card" in by.index else None
+    bo = by.loc["boleto"] if "boleto" in by.index else None
+    c = st.columns(4)
+    c[0].metric("Payé par carte de crédit", M.fmt_pct(cc["part_commandes_pct"]) if cc is not None else "n/a",
+                help="Part des commandes (moyen de paiement principal)", border=True)
+    c[1].metric("Payé par boleto", M.fmt_pct(bo["part_commandes_pct"]) if bo is not None else "n/a", border=True,
+                help="Boleto bancário : bordereau payé en agence ou en ligne, sans carte bancaire.")
+    c[2].metric("Mensualités moyennes (carte)", M.fmt_num(cc["mensualites"], 1) if cc is not None else "n/a", border=True)
+    c[3].metric("Panier moyen carte vs boleto",
+                f"{M.fmt_brl(cc['panier_moyen'], False)} / {M.fmt_brl(bo['panier_moyen'], False)}"
+                if cc is not None and bo is not None else "n/a", border=True)
+
+    l, r = st.columns([1, 1.3], gap="large")
+    with l:
+        st.subheader("Répartition du CA")
+        fig = px.pie(mix, names="moyen", values="ca", hole=.55, color="moyen", color_discrete_map=PAY_COLORS)
+        fig.update_traces(textinfo="percent", hovertemplate="<b>%{label}</b><br>%{value:,.0f} BRL (%{percent})<extra></extra>",
+                          sort=False)
+        show(style(fig, 300, legend=True))
+    with r:
+        st.subheader("Évolution de la part des commandes")
+        pm = c_insight("payments_monthly", SCOPE)
+        fig = px.area(pm, x="mois", y="part_pct", color="moyen", color_discrete_map=PAY_COLORS,
+                      category_orders={"moyen": list(PAY_COLORS)})
+        fig.update_traces(hovertemplate="%{x}<br>%{y:.1f} %<extra></extra>")
+        fig.update_yaxes(range=[0, 100], ticksuffix=" %")
+        show(style(fig, 300, legend=True))
+
+    st.subheader("Comparaison des moyens de paiement")
+    st.dataframe(mix[["moyen", "commandes", "part_ca_pct", "panier_moyen", "mensualites", "note", "avis_negatifs",
+                      "commandes_perdues_pct"]], hide_index=True, column_config={
+        "moyen": "Moyen", "commandes": st.column_config.NumberColumn("Commandes", format="localized"),
+        "part_ca_pct": st.column_config.ProgressColumn("Part du CA", format="%.1f %%", min_value=0, max_value=100),
+        "panier_moyen": st.column_config.NumberColumn("Panier moyen", format="%.0f BRL"),
+        "mensualites": st.column_config.NumberColumn("Mensualités", format="%.1f"),
+        "note": st.column_config.NumberColumn("Note", format="%.2f"),
+        "avis_negatifs": st.column_config.NumberColumn("Avis 1-2 ★", format="%.1f %%"),
+        "commandes_perdues_pct": st.column_config.NumberColumn("Annulées / indispo.", format="%.2f %%")})
+    st.caption("Annulées / indisponibles : part de toutes les commandes du moyen de paiement (avec un filtre catégorie, "
+               "seules les commandes du CA sont connues : ce taux devient alors partiel).")
+
+    l, r = st.columns(2, gap="large")
+    with l:
+        st.subheader("Mensualités et panier (carte de crédit)")
+        iv = c_insight("installments_vs_basket", SCOPE)
+        fig = go.Figure()
+        fig.add_bar(x=iv["tranche"].astype(str), y=iv["panier_moyen"], marker_color=BLUE, customdata=iv[["commandes", "part_pct"]],
+                    text=iv["panier_moyen"].map(lambda v: M.fmt_num(v)), textposition="outside", cliponaxis=False,
+                    hovertemplate="%{x}<br>panier moyen %{y:,.0f} BRL<br>%{customdata[0]:,} commandes "
+                                  "(%{customdata[1]:.1f} %)<extra></extra>")
+        fig.update_yaxes(title="Panier moyen (BRL)")
+        show(style(fig, 320))
+        if len(iv) and iv["panier_moyen"].notna().all():
+            callout(f"Payer en plusieurs fois accompagne des paniers bien plus élevés : "
+                    f"{M.fmt_brl(iv['panier_moyen'].iloc[0], False)} en 1 fois contre "
+                    f"{M.fmt_brl(iv['panier_moyen'].iloc[3], False)} en 7 à 10 fois. Mettre en avant le paiement en "
+                    "plusieurs fois sur les produits chers peut soutenir le panier moyen.")
+    with r:
+        st.subheader("Part du boleto par État")
+        bs = c_insight("boleto_by_state", SCOPE).dropna(subset=["lat"])
+        fig = px.scatter_geo(bs, lat="lat", lon="lng", size="commandes", color="boleto_pct", hover_name="etat", text="etat",
+                             color_continuous_scale=[[0, "#f4f6fa"], [1, WARN]], size_max=45,
+                             custom_data=["commandes", "boleto_pct"])
+        fig.update_traces(hovertemplate="<b>%{hovertext}</b><br>%{customdata[0]:,} commandes<br>boleto %{customdata[1]:.1f} %"
+                                        "<extra></extra>", textfont=dict(size=9, color=INK), marker_line_color="white")
+        fig.update_geos(projection_type="mercator", lataxis_range=[-34.5, 5.5], lonaxis_range=[-74.5, -33.5],
+                        showcountries=True, countrycolor="#c9d1de", showland=True, landcolor="#eef1f6",
+                        showocean=False, bgcolor="rgba(0,0,0,0)", showframe=False, showcoastlines=True, coastlinecolor="#c9d1de")
+        fig.update_layout(coloraxis_colorbar=dict(title="Boleto %", thickness=10, len=.8))
+        show(style(fig, 360))
+        st.caption("États d'au moins 300 commandes (filtre État ignoré ici). Le boleto sert les clients sans carte bancaire : "
+                   "là où il pèse lourd, un paiement plus simple peut élargir la clientèle.")
+
+
+# --------------------------------------------------------------------------
+# PAGE : Produits et catalogue
+# --------------------------------------------------------------------------
+def page_products():
+    page_head("Catalogue", "Produits et catalogue", f"Périmètre : {SCOPE.label()}")
+    pa = c_insight("pareto", SCOPE)
+    if not pa["produits"]:
+        st.info("Aucune vente sur ce périmètre.")
+        return
+    c = st.columns(3)
+    c[0].metric("Produits vendus", M.fmt_num(pa["produits"]), border=True)
+    c[1].metric("CA des 20 % meilleurs produits", M.fmt_pct(pa["part_ca_top20_pct"]), border=True)
+    c[2].metric("Produits pour 80 % du CA", f"{M.fmt_num(pa['produits_pour_80pct'])} ({M.fmt_pct(pa['part_produits_pour_80pct'], 0)})",
+                border=True)
+
+    l, r = st.columns([1, 1.2], gap="large")
+    with l:
+        st.subheader("Concentration du CA (Pareto)")
+        cv = pa["curve"]
+        fig = go.Figure()
+        fig.add_scatter(x=cv["part_produits_pct"], y=cv["part_ca_pct"], mode="lines", line=dict(color=BLUE, width=3),
+                        fill="tozeroy", fillcolor="rgba(31,78,140,.12)", name="CA cumulé",
+                        hovertemplate="%{x:.1f} % des produits<br>%{y:.1f} % du CA<extra></extra>")
+        fig.add_scatter(x=[0, 100], y=[0, 100], mode="lines", line=dict(color=GREY, dash="dot"), name="Répartition égale",
+                        hoverinfo="skip")
+        fig.add_vline(x=20, line_dash="dash", line_color=WARN)
+        fig.add_annotation(x=20, y=pa["part_ca_top20_pct"], text=f"20 % des produits = {M.fmt_pct(pa['part_ca_top20_pct'], 0)} du CA",
+                           showarrow=True, arrowhead=0, ax=70, ay=30, font=dict(size=11))
+        fig.update_xaxes(title="% des produits (du plus vendu au moins vendu)", ticksuffix=" %", range=[0, 100])
+        fig.update_yaxes(title="% du CA cumulé", ticksuffix=" %", range=[0, 101])
+        show(style(fig, 340))
+    with r:
+        st.subheader("Best-sellers : unités vs CA")
+        bs = c_insight("best_sellers", SCOPE, 15)
+        st.dataframe(bs[["produit", "categorie", "unites", "ca", "rang_ca", "note"]], hide_index=True, height=340,
+                     column_config={
+                         "produit": "Produit", "categorie": "Catégorie",
+                         "unites": st.column_config.NumberColumn("Unités", format="localized"),
+                         "ca": st.column_config.NumberColumn("CA (BRL)", format="compact"),
+                         "rang_ca": st.column_config.NumberColumn("Rang en CA", format="%d",
+                                                                  help="Un best-seller en volume peut être loin en CA (petit prix)."),
+                         "note": st.column_config.NumberColumn("Note", format="%.2f")})
+        st.caption("Classés par unités vendues. Le rang en CA montre si un produit très vendu rapporte vraiment.")
+
+    st.subheader("Qualité des fiches produits")
+    ph, de = c_insight("listing_quality", SCOPE)
+    l, r = st.columns(2, gap="large")
+    with l:
+        fig = go.Figure()
+        fig.add_bar(x=ph["tranche"].astype(str), y=ph["ca_par_produit"], marker_color=BLUE, customdata=ph[["produits", "note"]],
+                    text=ph["ca_par_produit"].map(lambda v: M.fmt_num(v)), textposition="outside", cliponaxis=False,
+                    hovertemplate="%{x}<br>%{y:,.0f} BRL de CA par produit<br>%{customdata[0]:,} produits<br>"
+                                  "note %{customdata[1]:.2f}<extra></extra>")
+        fig.update_yaxes(title="CA moyen par produit (BRL)")
+        show(style(fig, 300))
+        st.caption("CA moyen par produit selon le nombre de photos de la fiche.")
+    with r:
+        if len(de):
+            fig = go.Figure()
+            fig.add_bar(x=de["tranche"].astype(str), y=de["note"], marker_color="#3b82a0", customdata=de[["produits", "unites_par_produit"]],
+                        text=de["note"].map(lambda v: M.fmt_num(v, 2)), textposition="outside", cliponaxis=False,
+                        hovertemplate="%{x}<br>note %{y:.2f}<br>%{customdata[0]:,} produits<br>"
+                                      "%{customdata[1]:.2f} unités par produit<extra></extra>")
+            fig.update_yaxes(title="Note moyenne / 5", range=[3.8, 4.3])
+            show(style(fig, 300))
+            st.caption("Note moyenne selon la longueur de la description (quartiles). Axe resserré pour lire les écarts.")
+    if len(ph) >= 5 and ph["ca_par_produit"].notna().all():
+        callout(f"Les fiches avec 6 photos ou plus génèrent en moyenne {M.fmt_brl(ph['ca_par_produit'].iloc[4], False)} de CA par "
+                f"produit contre {M.fmt_brl(ph['ca_par_produit'].iloc[0], False)} avec une seule photo. "
+                "<span class='small'>Association observée : les produits chers ont aussi souvent plus de photos.</span>")
+
+    st.subheader("Poids et coût du fret")
+    wf = c_insight("weight_vs_freight", SCOPE)
+    fig = go.Figure()
+    fig.add_bar(x=wf["tranche"].astype(str), y=wf["fret_median"], name="Fret médian (BRL)", marker_color=BLUE,
+                hovertemplate="%{x}<br>fret médian %{y:.1f} BRL<extra></extra>")
+    fig.add_scatter(x=wf["tranche"].astype(str), y=wf["fret_pct_prix"], name="Fret / prix (%)", yaxis="y2",
+                    mode="lines+markers", line=dict(color=WARN, width=2.5),
+                    hovertemplate="%{x}<br>fret = %{y:.1f} % du prix<extra></extra>")
+    fig.update_layout(yaxis=dict(title="Fret médian par article (BRL)"),
+                      yaxis2=dict(title="Fret / prix (%)", overlaying="y", side="right", rangemode="tozero", showgrid=False))
+    show(style(fig, 320, legend=True))
+    st.caption("Le fret augmente avec le poids, mais pèse le plus lourd (en % du prix) sur les petits articles bon marché.")
+
+
+# --------------------------------------------------------------------------
+# PAGE : Carte des ventes
+# --------------------------------------------------------------------------
+def page_map():
+    page_head("Géographie", "Carte des ventes", f"Périmètre : {SCOPE.label()}")
+    side = st.segmented_control("Afficher", ["Clients", "Vendeurs"], default="Clients", key="map_side") or "Clients"
+    pts = c_insight("sales_points", SCOPE, side.lower())
+    total = c_summary(SCOPE)["chiffre_affaires_brl"]
+    if pts.empty:
+        st.info("Aucune vente géolocalisée sur ce périmètre.")
+        return
+    l, r = st.columns([1.6, 1], gap="large")
+    with l:
+        fig = px.density_map(pts, lat="lat", lon="lng", z="ca", radius=9, zoom=3.2, center=dict(lat=-15.5, lon=-51),
+                             map_style="carto-positron", color_continuous_scale=[[0, "#c8d7ee"], [.5, BLUE], [1, "#0d2b55"]],
+                             hover_name="city", custom_data=["state", "ca", "n"])
+        fig.update_traces(hovertemplate="<b>%{hovertext}</b> (%{customdata[0]})<br>%{customdata[1]:,.0f} BRL<br>"
+                                        f"%{{customdata[2]:,}} {side.lower()}<extra></extra>")
+        fig.update_layout(coloraxis_showscale=False)
+        show(style(fig, 520))
+        st.caption(f"Densité du CA par code postal des {side.lower()} · {M.fmt_pct(pts['ca'].sum() / total * 100 if total else None)} "
+                   "du CA géolocalisé (codes postaux sans coordonnées exclus).")
+    with r:
+        st.markdown(f"**Villes qui pèsent le plus ({side.lower()})**")
+        cr = I.city_ranking(pts, 12)
+        cr["ville"] = cr["city"].str.title() + " (" + cr["state"] + ")"
+        st.dataframe(cr[["ville", "ca", "part_ca_pct", "n"]], hide_index=True, height=480, column_config={
+            "ville": "Ville", "ca": st.column_config.NumberColumn("CA (BRL)", format="compact"),
+            "part_ca_pct": st.column_config.ProgressColumn("Part", format="%.1f %%", min_value=0,
+                                                           max_value=float(cr["part_ca_pct"].max())),
+            "n": st.column_config.NumberColumn(side, format="localized")})
+
+    st.subheader("Flux vendeur → client entre États")
+    sv = c_insight("same_vs_other_state", SCOPE)
+    if len(sv) == 2:
+        a, b = sv.set_index("flux").loc["Même État"], sv.set_index("flux").loc["Autre État"]
+        c = st.columns(4)
+        c[0].metric("Commandes hors de l'État du vendeur", M.fmt_pct(b["commandes"] / sv["commandes"].sum() * 100, 0), border=True)
+        c[1].metric("Délai médian : même État / autre", f"{M.fmt_num(a['delai_median'])} j / {M.fmt_num(b['delai_median'])} j", border=True)
+        c[2].metric("Retard : même État / autre", f"{M.fmt_pct(a['taux_retard'])} / {M.fmt_pct(b['taux_retard'])}", border=True)
+        c[3].metric("Note : même État / autre", f"{M.fmt_num(a['note'], 2)} / {M.fmt_num(b['note'], 2)}", border=True)
+        callout(f"<b>La distance coûte cher :</b> livrée dans un autre État, une commande met {M.fmt_num(b['delai_median'])} jours "
+                f"au lieu de {M.fmt_num(a['delai_median'])}, arrive en retard {M.fmt_pct(b['taux_retard'])} du temps "
+                f"(contre {M.fmt_pct(a['taux_retard'])}) et coûte {M.fmt_brl(b['fret_moyen'], False)} de fret "
+                f"(contre {M.fmt_brl(a['fret_moyen'], False)}). Recruter des vendeurs hors de São Paulo, près des grands "
+                "bassins de clients, réduirait délais et retards.", "bad")
+    fl = c_insight("state_flows", SCOPE)
+    if len(fl):
+        top_s = fl.groupby("seller_state")["commandes"].sum().nlargest(8).index
+        top_c = fl.groupby("customer_state")["commandes"].sum().nlargest(12).index
+        m = fl[fl["seller_state"].isin(top_s) & fl["customer_state"].isin(top_c)]
+        z = m.pivot(index="seller_state", columns="customer_state", values="taux_retard").reindex(index=top_s, columns=top_c)
+        n = m.pivot(index="seller_state", columns="customer_state", values="commandes").reindex(index=top_s, columns=top_c)
+        fig = go.Figure(go.Heatmap(z=z.values, x=list(z.columns), y=list(z.index), customdata=n.values,
+                                   colorscale=[[0, GOOD], [.35, "#f2d16b"], [1, BAD]], zmin=0, zmax=25,
+                                   text=[["" if np.isnan(v) else f"{v:.0f}" for v in row] for row in z.values],
+                                   texttemplate="%{text}", colorbar=dict(title="Retard %", thickness=10),
+                                   hovertemplate="vendeur %{y} → client %{x}<br>retard %{z:.1f} %<br>"
+                                                 "%{customdata:,} commandes<extra></extra>"))
+        fig.update_xaxes(title="État du client", side="top")
+        fig.update_yaxes(title="État du vendeur", autorange="reversed")
+        show(style(fig, 380))
+        st.caption("Taux de retard (%) par flux, pour les principaux États vendeurs et clients (flux d'au moins 50 commandes). "
+                   "Filtre État client appliqué.")
+        with st.expander("Flux les plus problématiques (au moins 200 commandes)"):
+            w = fl[(fl["commandes"] >= 200) & ~fl["meme_etat"]].sort_values("taux_retard", ascending=False).head(15)
+            w = w.assign(flux=w["seller_state"] + " → " + w["customer_state"])
+            st.dataframe(w[["flux", "commandes", "delai_median", "taux_retard", "fret_moyen", "note"]], hide_index=True,
+                         column_config={
+                             "flux": "Vendeur → client", "commandes": st.column_config.NumberColumn("Commandes", format="localized"),
+                             "delai_median": st.column_config.NumberColumn("Délai médian (j)", format="%.0f"),
+                             "taux_retard": st.column_config.ProgressColumn("Retard", format="%.1f %%", min_value=0, max_value=30),
+                             "fret_moyen": st.column_config.NumberColumn("Fret moyen", format="%.1f BRL"),
+                             "note": st.column_config.NumberColumn("Note", format="%.2f")})
+
+
+# --------------------------------------------------------------------------
 # Chatbot Pilot (panneau à droite du dashboard)
 # --------------------------------------------------------------------------
 AGENT_BADGE = {"Agent KPI": ":blue-badge[Agent KPI]", "BI Analyst": ":violet-badge[BI Analyst]",
-               "XAI": ":orange-badge[XAI]", "Calculs Pilot": ":gray-badge[Calculs]"}
+               "XAI": ":orange-badge[XAI]", "Calculs Pilot": ":gray-badge[Calculs]",
+               "Garde-fou": ":red-badge[Hors périmètre]"}
 PAGE_SUGGESTIONS = {
     "Ventes": ["Pourquoi le CA a-t-il baissé le dernier mois ?", "Quelles catégories reculent ?",
                "Compare août 2018 à août 2017"],
@@ -438,6 +793,10 @@ PAGE_SUGGESTIONS = {
                             "Où les retards sont-ils les plus graves ?"],
     "Vendeurs": ["Quels vendeurs dois-je appeler en priorité ?", "Quelles alertes sur les vendeurs ?"],
     "Scénarios": ["Et si on réduisait les retards de 3 points ?", "Que vaut une fidélisation à 6 % ?"],
+    "Clients": ["Quels segments de clients relancer en priorité ?", "Combien de clients reviennent ?"],
+    "Paiements": ["Quel moyen de paiement a le panier moyen le plus élevé ?", "Le boleto augmente-t-il les annulations ?"],
+    "Produits": ["Quels produits se vendent le plus ?", "Quelles catégories reculent ?"],
+    "Carte": ["Où les retards sont-ils les plus graves ?", "Pourquoi les clients donnent-ils de mauvaises notes ?"],
 }
 COMMON_SUGGESTIONS = ["Quelles sont les alertes sur ce périmètre ?", "Que faire en priorité ?"]
 
@@ -486,7 +845,12 @@ def render_answer(msg, key):
         st.caption(f":material/info: {msg['warning']}")
     st.markdown(msg["content"])
     render_artifacts(msg.get("artifacts", []), key)
-    if msg.get("trace"):
+    if msg.get("trace") and agents == ["Garde-fou"]:
+        p = msg["trace"][0]["parametres"]
+        with st.expander("Contrôle du périmètre"):
+            st.markdown(f"- Motif : {p.get('motif')} (décidé par : {p.get('decide_par')})")
+            st.caption("Aucun agent n'a été appelé : la question ne porte pas sur l'activité d'Olist.")
+    elif msg.get("trace"):
         with st.expander(f"Comment j'ai calculé ({len(msg['trace'])})"):
             for t in msg["trace"]:
                 params = " · ".join(f"{k} = {v}" for k, v in t["parametres"].items()) or "périmètre du dashboard"
@@ -560,7 +924,11 @@ def chat_panel(page_title: str):
 PAGES = {
     "perf": st.Page(page_performance, title="Ventes", icon=":material/trending_up:", url_path="ventes", default=True),
     "deliv": st.Page(page_delivery, title="Livraison & clients", icon=":material/local_shipping:", url_path="livraison"),
+    "customers": st.Page(page_customers, title="Clients", icon=":material/group:", url_path="clients"),
     "sellers": st.Page(page_sellers, title="Vendeurs", icon=":material/storefront:", url_path="vendeurs"),
+    "products": st.Page(page_products, title="Produits", icon=":material/inventory_2:", url_path="produits"),
+    "payments": st.Page(page_payments, title="Paiements", icon=":material/payments:", url_path="paiements"),
+    "map": st.Page(page_map, title="Carte", icon=":material/map:", url_path="carte"),
     "scen": st.Page(page_scenarios, title="Scénarios", icon=":material/tune:", url_path="scenarios"),
 }
 current = st.navigation(list(PAGES.values()), position="top")

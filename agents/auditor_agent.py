@@ -55,7 +55,7 @@ def load_facts() -> dict:
     def read(name: str) -> pd.DataFrame:
         p = CURATED / name
         if not p.exists():
-            raise FileNotFoundError(f"Table curated absente : {p} (l'ETL doit tourner avant l'auditeur).")
+            raise FileNotFoundError(f"Table curated absente : {p} (le modèle métier Olist, olist_model_agent, doit tourner avant l'auditeur).")
         return pd.read_csv(p)
 
     return {"sales": read("fact_sales.csv"), "orders": read("fact_orders.csv")}
@@ -226,7 +226,8 @@ def fact_reconciliations(f) -> list:
                    "detail": f"{bad} ligne(s) incohérente(s)"})
 
     # Recalcul INDÉPENDANT depuis les CSV bruts (sans passer par l'ETL) : un écart ici
-    # signifie que l'ETL a perdu, dupliqué ou mal filtré des données -> cause "etl".
+    # signifie que le modèle métier a perdu, dupliqué ou mal filtré des données -> cause "etl"
+    # (l'orchestrateur relance alors olist_model).
     try:
         cfg = json.loads((ROOT / "etl_config.json").read_text(encoding="utf-8"))
         statuses = cfg.get("revenue_statuses", ["delivered"])

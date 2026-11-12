@@ -41,13 +41,15 @@ SEV_FR = {"high": "Critique", "medium": "Moyen", "low": "Mineur"}
 STATUS_FR = {"success": "terminé", "failed": "échec", "skipped": "à venir", "info": "info"}
 AGENT_FR = {
     "profiler": "Profiler",
-    "etl": "ETL",
-    "kpi": "KPI",
+    "etl": "ETL générique",
+    "kpi": "KPI générique",
+    "olist_model": "Modèle métier Olist",
+    "olist_kpi": "KPI métier Olist",
     "analyst": "Analyste",
     "dashboard": "Dashboard",
     "auditor": "Auditeur",
 }
-ORDER = ["profiler", "etl", "kpi", "analyst", "dashboard", "auditor"]
+ORDER = ["profiler", "etl", "kpi", "olist_model", "olist_kpi", "analyst", "dashboard", "auditor"]
 
 TABLE_INFO = {
     "fact_sales": ("Ventes par article", "Une ligne par article vendu (CA, coût, marge)."),
@@ -58,7 +60,8 @@ TABLE_INFO = {
     "dim_geolocation": ("Géolocalisation", "Positions par code postal."),
     "dim_date": ("Calendrier", "Jours, mois, trimestres et jours fériés."),
     "dim_events": ("Événements", "Événements commerciaux et jours fériés."),
-    "reviews": ("Avis clients", "Notes et commentaires."),
+    "reviews_clean": ("Avis clients", "Notes et commentaires (dates converties, doublons retirés)."),
+    "analytical_base": ("Table d'analyse générique", "Table de faits principale + dimensions jointes (ETL générique)."),
 }
 
 
@@ -190,8 +193,11 @@ def raw_stamp():
 orch = load_json(PROFILE_DIR / "orchestrator_log.json")
 profile = load_json(PROFILE_DIR / "profile.json")
 decision = load_json(PROFILE_DIR / "profiler_agent_decision.json")
-etl_dec = load_json(ETL_DIR / "etl_agent_decision.json")
-etl_log = load_json(ETL_DIR / "correction_log.json")
+generic_etl = load_json(ETL_DIR / "etl_agent_decision.json")          # socle générique
+generic_model = load_json(ETL_DIR / "model.json")
+generic_kpi = load_json(DATA / "kpi" / "generic_kpi_results.json")
+etl_dec = load_json(ETL_DIR / "olist_model_decision.json")             # couche métier Olist
+etl_log = load_json(ETL_DIR / "olist_correction_log.json")
 kpi_data = load_json(KPI_RESULTS_FILE) or {}
 analyst = load_json(ANALYST_FILE) or {}
 audit = load_json(AUDIT_FILE) or {}
@@ -260,13 +266,10 @@ if page == PAGES[0]:
         ("Données brutes", raw_ok, "fichiers Olist"),
         ("Profiler", bool(decision), "diagnostic et score"),
         ("Validation humaine", bool(saved) and not pend, "traductions"),
-        ("ETL", bool(etl_dec), "nettoyage tracé"),
-        (
-            "Tables préparées",
-            (CURATED / "fact_sales.csv").exists(),
-            "ventes et commandes",
-        ),
-        ("KPI", bool(kpi_data), "indicateurs calculés"),
+        ("ETL générique", bool(generic_etl), "nettoyage, relations et modèle déduits automatiquement"),
+        ("KPI générique", bool(generic_kpi), "indicateurs planifiés sur n'importe quel jeu de données"),
+        ("Modèle métier Olist", bool(etl_dec), "règles métier : CA, retards, coûts, calendrier"),
+        ("KPI métier Olist", bool(kpi_data), "indicateurs officiels audités"),
         ("Analyste", bool(analyst), "tendances, alertes et recommandations"),
         ("Dashboard", DASHBOARD_HTML.exists(), "dashboard HTML interactif (KPI + analyses)"),
         ("Audit", bool(audit) and audit.get("passed", False), "recalcul indépendant et traçabilité"),
@@ -656,26 +659,32 @@ elif page == PAGES[2]:
 elif page == PAGES[3]:
     header(
         "Données préparées",
-        "Corrections appliquées par l'ETL et tables propres prêtes pour l'analyse",
+        "Socle générique (tout jeu de CSV) puis modèle métier Olist, prêts pour l'analyse",
         "ETL",
     )
 
     help_box(
-        "Consulte les contrôles, hypothèses, journal de corrections et tables préparées."
+        "*Socle générique* : l'ETL analyse chaque colonne, nettoie selon un catalogue fermé "
+        "d'opérations, découvre les clés et les jointures, puis déduit le modèle (étoile, flocon, "
+        "constellation). Le KPI générique planifie ses indicateurs sur ce modèle.\n\n"
+        "*Modèle métier Olist* : ajoute les règles propres au domaine (CA livré, retards, coûts, "
+        "calendrier) ; c'est la source des KPI officiels, de l'Analyste, du Dashboard et de l'Auditeur."
     )
 
-    if not etl_dec:
+    if not etl_dec and not generic_etl:
         st.warning("L'ETL n'a pas encore tourné.")
         st.stop()
 
-    note(
-        f'Dernière exécution : {etl_dec.get("run_at", "?")} · '
-        f'statut : {etl_dec.get("status", "?")}',
-        "ok" if etl_dec.get("status") == "success" else "warn",
-    )
+    if etl_dec:
+        note(
+            f'Modèle métier : dernière exécution {etl_dec.get("run_at", "?")} · '
+            f'statut : {etl_dec.get("status", "?")}',
+            "ok" if etl_dec.get("status") == "success" else "warn",
+        )
 
-    a, b, c, d = st.tabs(
+    g, a, b, c, d = st.tabs(
         [
+            "Socle générique",
             "Avant / après",
             "Contrôles et hypothèses",
             "Corrections",
@@ -683,67 +692,116 @@ elif page == PAGES[3]:
         ]
     )
 
+    with g:
+        if not generic_etl:
+            st.info("L'ETL générique n'a pas encore tourné.")
+        else:
+            gm = generic_model or {}
+            cols = st.columns(4)
+            kpi(cols[0], "Type de schéma", gm.get("schema_type", "?"))
+            kpi(cols[1], "Tables de faits", len(gm.get("facts", [])))
+            kpi(cols[2], "Dimensions", len(gm.get("dimensions", [])))
+            kpi(cols[3], "Lignes analysées", fmt(generic_etl.get("rows_analytical_base", 0)),
+                f'fait principal : {generic_etl.get("fact_table", "?")}')
+            note(f'Source : <code>{html.escape(str(generic_etl.get("source_dir", "data/raw")))}</code> · '
+                 f'statut : {html.escape(str(generic_etl.get("status", "?")))} · '
+                 f'{len(generic_etl.get("attempts", []))} essai(s)',
+                 "ok" if generic_etl.get("status") == "success" else "warn")
+            if gm.get("facts"):
+                st.markdown("**Tables de faits déduites**")
+                st.dataframe(pd.DataFrame([{"Table": f["table"], "Mesures": ", ".join(f["measures"]),
+                                            "Dates": ", ".join(f["time"])} for f in gm["facts"]]),
+                             width="stretch", hide_index=True)
+            if gm.get("dimensions"):
+                st.markdown("**Dimensions**")
+                st.dataframe(pd.DataFrame([{"Table": x["table"], "Clé": x.get("key"),
+                                            "Référencée par": ", ".join(x.get("referenced_by", []))}
+                                           for x in gm["dimensions"]]), width="stretch", hide_index=True)
+            if gm.get("isolated_tables"):
+                note("Tables isolées (aucune relation trouvée) : "
+                     + html.escape(", ".join(gm["isolated_tables"])), "warn")
+            if generic_etl.get("checks"):
+                st.markdown("**Contrôles de l'ETL générique**")
+                st.dataframe(pd.DataFrame(generic_etl["checks"]), width="stretch", hide_index=True)
+            for w in generic_etl.get("warnings", []):
+                note(html.escape(str(w)), "warn")
+            if generic_kpi and generic_kpi.get("headline"):
+                st.markdown(f'**KPI générique** · planificateur : `{generic_kpi.get("planner", "?")}` · '
+                            f'domaine détecté : {generic_kpi.get("domain_detected", "?")}')
+                st.dataframe(pd.DataFrame([{"Indicateur": h["label"], "Valeur": h["formatted"],
+                                            "Table": h["table"], "Calcul": h["agg"]}
+                                           for h in generic_kpi["headline"]]),
+                             width="stretch", hide_index=True)
+
+    if not etl_dec:
+        for tab in (a, b, c):
+            with tab:
+                st.info("Le modèle métier Olist n'a pas encore tourné (ou ne s'applique pas à ces données).")
+
     with a:
-        cols = st.columns(2)
-        kpi(
-            cols[0],
-            "Table des ventes",
-            fmt(etl_dec.get("rows_fact_sales", 0)),
-        )
-        kpi(
-            cols[1],
-            "Table des commandes",
-            fmt(etl_dec.get("rows_fact_orders", 0)),
-        )
-
-        rb = etl_dec.get("rows_before", {})
-        df = pd.DataFrame(
-            [{"Table brute": k, "Lignes": v} for k, v in rb.items()]
-        )
-
-        if not df.empty:
-            st.plotly_chart(
-                style_fig(
-                    px.bar(
-                        df,
-                        x="Lignes",
-                        y="Table brute",
-                        orientation="h",
-                        title="Fichiers bruts Olist",
-                    )
-                ),
-                width="stretch",
+        if etl_dec:
+            cols = st.columns(2)
+            kpi(
+                cols[0],
+                "Table des ventes",
+                fmt(etl_dec.get("rows_fact_sales", 0)),
             )
+            kpi(
+                cols[1],
+                "Table des commandes",
+                fmt(etl_dec.get("rows_fact_orders", 0)),
+            )
+
+            rb = etl_dec.get("rows_before", {})
+            df = pd.DataFrame(
+                [{"Table brute": k, "Lignes": v} for k, v in rb.items()]
+            )
+
+            if not df.empty:
+                st.plotly_chart(
+                    style_fig(
+                        px.bar(
+                            df,
+                            x="Lignes",
+                            y="Table brute",
+                            orientation="h",
+                            title="Fichiers bruts Olist",
+                        )
+                    ),
+                    width="stretch",
+                )
 
     with b:
-        checks = etl_dec.get("checks", [])
+        if etl_dec:
+            checks = etl_dec.get("checks", [])
 
-        if checks:
-            st.dataframe(
-                pd.DataFrame(checks),
-                width="stretch",
-                hide_index=True,
-            )
+            if checks:
+                st.dataframe(
+                    pd.DataFrame(checks),
+                    width="stretch",
+                    hide_index=True,
+                )
 
-        for item in etl_dec.get("assumptions", []):
-            note(html.escape(str(item)), "warn")
+            for item in etl_dec.get("assumptions", []):
+                note(html.escape(str(item)), "warn")
 
-        if etl_dec.get("untranslated_categories_left"):
-            note(
-                "Catégories non traduites : "
-                + html.escape(", ".join(etl_dec["untranslated_categories_left"])),
-                "warn",
-            )
+            if etl_dec.get("untranslated_categories_left"):
+                note(
+                    "Catégories non traduites : "
+                    + html.escape(", ".join(etl_dec["untranslated_categories_left"])),
+                    "warn",
+                )
 
     with c:
-        if etl_log:
-            st.dataframe(
-                pd.DataFrame(etl_log),
-                width="stretch",
-                hide_index=True,
-            )
-        else:
-            st.info("Pas de journal de corrections.")
+        if etl_dec:
+            if etl_log:
+                st.dataframe(
+                    pd.DataFrame(etl_log),
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.info("Pas de journal de corrections.")
 
     with d:
         files = [
@@ -823,9 +881,9 @@ elif page == PAGES[4]:
         st.warning("Résultats KPI absents ou anciens. Lance le pipeline complet puis rafraîchis.")
         st.stop()
 
-    # ---------------- Filtres : les KPI sont recalculés par l'agent KPI lui-même (kpi_agent.compute)
+    # ---------------- Filtres : les KPI sont recalculés par l'agent KPI métier lui-même (compute)
     sys.path.insert(0, str(ROOT / "agents"))
-    import kpi_agent as KA
+    import olist_kpi_agent as KA
 
     @st.cache_resource(show_spinner="Chargement des tables pour les filtres…", max_entries=1)
     def kpi_tables(stamp):
@@ -1186,9 +1244,9 @@ elif page == "Lancer et suivre":
     )
 
     help_box(
-        "Ordre conseillé : Profiler, validation humaine, ETL. "
-        "« Pipeline complet » enchaîne les agents. "
-        "Les agents non construits peuvent être ignorés."
+        "Ordre conseillé : Profiler, validation humaine, puis « Pipeline complet ». "
+        "Le pipeline enchaîne le socle générique (ETL, KPI) puis la couche métier Olist "
+        "(modèle, KPI métier, Analyste, Dashboard, Auditeur). Les boutons isolés relancent une seule étape."
     )
 
     if orch:
@@ -1300,7 +1358,8 @@ elif page == "Lancer et suivre":
         task = ("Analyste", ["agents/analyst_agent.py"] + (["--no-llm"] if no_llm else []))
 
     if d.button("Lancer les KPI", width="stretch"):
-        task = ("KPI", ["agents/kpi_agent.py"])
+        # KPI générique puis KPI métier (source des pages KPI, Analyses et Audit)
+        task = ("KPI", ["agents/run_steps.py", "kpi", "olist_kpi"] + (["--no-llm"] if no_llm else []))
 
     if a.button("Lancer le Profiler", width="stretch"):
         task = (
@@ -1310,7 +1369,8 @@ elif page == "Lancer et suivre":
         )
 
     if b.button("Lancer l'ETL", width="stretch"):
-        task = ("ETL", ["agents/etl_agent.py"])
+        # ETL générique puis modèle métier Olist (même ordre que le pipeline)
+        task = ("ETL", ["agents/run_steps.py", "etl", "olist_model"] + (["--no-llm"] if no_llm else []))
 
     if c.button(
         "Pipeline complet",
@@ -1740,8 +1800,9 @@ elif page == "Audit & XAI":
                 fig = px.bar(steps, x="Agent", y="Durée (s)", title="Temps d'exécution par agent")
                 st.plotly_chart(style_fig(fig, 300), width="stretch")
 
-            st.caption("Qualité : part des contrôles réussis (ETL, KPI) ou des KPI sans écart "
-                       "(auditeur). Le profiler ne produit pas de score chiffré.")
+            st.caption("Qualité : score de fiabilité des données (Profiler), part des contrôles réussis "
+                       "(ETL, modèle métier, Dashboard), part des KPI calculés (KPI), part des insights "
+                       "vérifiés (Analyste) ou des KPI sans écart (Auditeur).")
 
             for name, ag in evaluation.get("per_agent", {}).items():
                 with st.expander(f"Métriques détaillées · {AGENT_FR.get(name, name)}"):

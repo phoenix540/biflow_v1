@@ -21,24 +21,32 @@ load_dotenv(ROOT / ".env")
 import warnings  # noqa: E402
 warnings.filterwarnings("ignore", message=".*fixed sampling defaults.*")
 
-# dashboard : génère data/dashboard/dashboard.html (KPI + analyses du BI Analyst) avant l'audit final.
-PIPELINE = ["profiler", "etl", "kpi", "analyst", "dashboard", "auditor"]
+# Socle générique (tout jeu de CSV) : profiler -> etl -> kpi
+# Couche métier Olist : olist_model -> olist_kpi -> analyst -> dashboard -> auditor
+# Si le jeu de données n'est pas Olist, olist_model répond "non applicable" et le run se termine
+# après le socle générique.
+GENERIC = ["profiler", "etl", "kpi"]
+BUSINESS = ["olist_model", "olist_kpi", "analyst", "dashboard", "auditor"]
+PIPELINE = GENERIC + BUSINESS
 NEXT = {n: (PIPELINE[i + 1] if i + 1 < len(PIPELINE) else "finish")
         for i, n in enumerate(PIPELINE)}
 
 # nom de l'étape -> fichier dans agents/ (qui doit contenir une fonction run())
 MODULES = {
-    "profiler":  "profiler_agent",
-    "etl":       "etl_agent",
-    "kpi":       "kpi_agent",
-    "analyst":   "analyst_agent",
+    "profiler":    "profiler_agent",
+    "etl":         "etl_agent",
+    "kpi":         "kpi_agent",
+    "olist_model": "olist_model_agent",
+    "olist_kpi":   "olist_kpi_agent",
+    "analyst":     "analyst_agent",
     "dashboard": "dashboard_agent",
     "auditor":   "auditor_agent",
 }
 
 MAX_RETRY = 1         # réessais par agent
-# Agents déterministes (sans LLM) : un réessai donnerait exactement la même erreur
-NO_RETRY = {"etl", "kpi", "dashboard"}
+# Agents déterministes (leurs appels LLM facultatifs ont leur propre repli) : un réessai donnerait
+# exactement la même erreur
+NO_RETRY = {"etl", "kpi", "olist_model", "olist_kpi", "dashboard"}
 MAX_AUDIT_LOOP = 1    # retours en arrière demandés après audit
 USE_LLM = "--no-llm" not in sys.argv
 
@@ -90,14 +98,16 @@ def compact(step: dict) -> dict:
             "result": {k: v for k, v in step.get("result", {}).items() if k != "outputs"}}
 
 
-DECISION_PROMPT = """Tu es l'Orchestrator d'un pipeline BI multi-agents (projet BIFlow, données Olist).
-Pipeline : profiler -> etl -> kpi -> analyst -> dashboard -> auditor.
+DECISION_PROMPT = """Tu es l'Orchestrator d'un pipeline BI multi-agents (projet BIFlow).
+Pipeline : socle générique profiler -> etl -> kpi, puis couche métier Olist
+olist_model -> olist_kpi -> analyst -> dashboard -> auditor.
 On te donne le résultat de l'agent qui vient de s'exécuter et une liste d'OPTIONS AUTORISÉES.
 Tu dois choisir UNE option de cette liste, jamais autre chose.
 Principes : un échec temporaire (réseau, limite de débit) justifie un réessai ; une erreur de code ou de données
 qui reviendra à l'identique justifie l'arrêt. Ne stoppe après le profiler que si les données sont inexploitables :
 des problèmes à corriger par l'ETL ne sont pas une raison d'arrêter. Après un audit non conforme, recalcule l'étape
-la plus probablement en cause (écarts de formule -> KPI ; données incohérentes -> ETL) ; n'accepte avec avertissement
+la plus probablement en cause (écarts de formule -> KPI métier ; données incohérentes -> modèle métier) ;
+n'accepte avec avertissement
 que si l'écart paraît mineur.
 Réponds UNIQUEMENT par un JSON : {"choice": "<option>", "reason": "une phrase en français"}"""
 
@@ -137,6 +147,9 @@ def decide(name: str, step: dict, state: State, retries: dict) -> dict:
     elif step["status"] == "success" and res.get("stop"):
         return {"agent": name, "next": "finish", "by": "rule",
                 "reason": "l'agent a demandé l'arrêt (données inexploitables)"}
+    elif step["status"] == "success" and res.get("applicable") is False:
+        return {"agent": name, "next": "finish", "by": "rule",
+                "reason": "couche métier Olist non applicable à ce jeu de données : fin après le socle générique"}
     elif name == "auditor" and step["status"] == "success" \
             and res.get("passed", True) is False and loops < MAX_AUDIT_LOOP:
         options = {"recalculate_kpi": "retry_kpi", "recalculate_etl": "retry_etl",
@@ -270,7 +283,8 @@ def finish(state: State) -> State:
             L.append(f"  - Raison : {s['reason']}")
         if s.get("error"):
             L.append(f"  - Erreur : {s['error'][:300]}")
-        for k in ("verdict", "issues", "high_issues", "data_gaps", "reused",
+        for k in ("verdict", "issues", "high_issues", "data_gaps", "reused", "schema_type",
+                  "fact_table", "rows_analytical_base", "domain_detected", "headline_count", "applicable",
                   "insights", "alerts", "generated_by", "unverified_insights",
                   "charts", "passed", "critical_failures", "warnings"):
             if k in s.get("result", {}):
@@ -293,8 +307,8 @@ def build_graph():
     g = StateGraph(State)
     for name in PIPELINE:
         g.add_node(name, make_node(name))
-    g.add_node("retry_kpi", make_retry("kpi"))
-    g.add_node("retry_etl", make_retry("etl"))
+    g.add_node("retry_kpi", make_retry("olist_kpi"))
+    g.add_node("retry_etl", make_retry("olist_model"))
     g.add_node("finish", finish)
 
     g.add_edge(START, PIPELINE[0])
@@ -303,8 +317,9 @@ def build_graph():
     for name in PIPELINE:
         g.add_conditional_edges(name, lambda s: s["next"], destinations)
 
-    g.add_edge("retry_kpi", "kpi")
-    g.add_edge("retry_etl", "etl")
+    # après un audit non conforme : on recalcule la couche métier (c'est elle que l'Auditor contrôle)
+    g.add_edge("retry_kpi", "olist_kpi")
+    g.add_edge("retry_etl", "olist_model")
     g.add_edge("finish", END)
     return g.compile()
 

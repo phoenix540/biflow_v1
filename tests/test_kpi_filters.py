@@ -1,4 +1,4 @@
-"""Filtres du KPI Dashboard : kpi_agent.compute / filter_frames."""
+"""Filtres du KPI Dashboard : olist_kpi_agent.compute / filter_frames."""
 import json
 import sys
 from pathlib import Path
@@ -7,7 +7,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "agents"))
-import kpi_agent as K  # noqa: E402
+import olist_kpi_agent as K  # noqa: E402
 
 KPI_JSON = ROOT / "data" / "kpi" / "kpi_results.json"
 pytestmark = pytest.mark.skipif(not (K.CURATED / "fact_orders.csv").exists() or not KPI_JSON.exists(),

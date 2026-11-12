@@ -26,10 +26,13 @@ OUT_DIR = D / "eval"
 SOURCES = {
     "orchestrator": D / "profile" / "orchestrator_log.json",
     "profiler":     D / "profile" / "profiler_agent_decision.json",
-    "etl_decision": D / "etl" / "etl_agent_decision.json",
+    "etl_decision": D / "etl" / "etl_agent_decision.json",   # ETL générique
     "etl_log":      D / "etl" / "correction_log.json",
     "profile":      D / "profile" / "profile.json",          # score de fiabilité global (statistique)
-    "kpi":          D / "kpi" / "kpi_results.json",
+    "kpi":          D / "kpi" / "generic_kpi_results.json",  # KPI générique
+    "model":        D / "etl" / "olist_model_decision.json", # couche métier Olist
+    "model_log":    D / "etl" / "olist_correction_log.json",
+    "olist_kpi":    D / "kpi" / "kpi_results.json",
     "analyst":      D / "analyst" / "analyst_insights.json",
     "dashboard":    D / "dashboard" / "dashboard_agent_decision.json",
     "auditor":      D / "audit" / "lineage_cards.json",
@@ -66,12 +69,15 @@ def eval_profiler(data, profile=None) -> dict:
 
 
 def eval_etl(decision, log) -> dict:
+    """ETL générique ou modèle métier : même logique (part des contrôles réussis)."""
     out = {"present": bool(decision or log)}
     if decision:
         checks = decision.get("checks", [])
         failed = [c for c in checks if not c.get("passed", True)] if checks else decision.get("checks_failed", [])
         total = len(checks) if checks else None
         out.update({"status": decision.get("status"),
+                    "schema_type": decision.get("schema_type"),
+                    "rows_analytical_base": decision.get("rows_analytical_base"),
                     "rows_fact_sales": decision.get("rows_fact_sales"),
                     "rows_fact_orders": decision.get("rows_fact_orders"),
                     "checks_total": total, "checks_failed": len(failed)})
@@ -83,6 +89,20 @@ def eval_etl(decision, log) -> dict:
         entries = log if isinstance(log, list) else log.get("entries", [])
         out["corrections_applied"] = len(entries)
     return out
+
+
+def eval_generic_kpi(data) -> dict:
+    if not data:
+        return {"present": False}
+    # qualité = part des indicateurs planifiés effectivement calculés au dernier essai
+    last = (data.get("attempts_log") or [{}])[-1]
+    computed = len(data.get("headline", []))
+    errors = len(last.get("validation_errors", []))
+    total = computed + errors
+    return {"present": True, "planner": data.get("planner"), "domain": data.get("domain_detected"),
+            "headline_kpis": computed, "breakdowns": len(data.get("breakdowns", [])),
+            "checks_total": total, "checks_failed": errors,
+            "quality_score": round(computed / total, 4) if total else None}
 
 
 def eval_kpi(data) -> dict:
@@ -185,8 +205,10 @@ def write_reports(report: dict) -> None:
 
     rows = [
         ("profiler", pa["profiler"], f"verdict={pa['profiler'].get('verdict')} issues={pa['profiler'].get('issues')} (high={pa['profiler'].get('high_issues')})"),
-        ("etl", pa["etl"], f"{pa['etl'].get('rows_fact_sales')} ventes / {pa['etl'].get('rows_fact_orders')} commandes — échecs={pa['etl'].get('checks_failed')}"),
-        ("kpi", pa["kpi"], f"{pa['kpi'].get('headline_kpis')} indicateurs clés, {len(pa['kpi'].get('sections', []))} découpages — vides={pa['kpi'].get('checks_failed')}"),
+        ("etl", pa["etl"], f"schéma {pa['etl'].get('schema_type')}, {pa['etl'].get('rows_analytical_base')} lignes analysées — échecs={pa['etl'].get('checks_failed')}"),
+        ("kpi", pa["kpi"], f"{pa['kpi'].get('headline_kpis')} indicateurs ({pa['kpi'].get('planner')}), {pa['kpi'].get('breakdowns')} découpages — erreurs={pa['kpi'].get('checks_failed')}"),
+        ("olist_model", pa["olist_model"], f"{pa['olist_model'].get('rows_fact_sales')} ventes / {pa['olist_model'].get('rows_fact_orders')} commandes — échecs={pa['olist_model'].get('checks_failed')}"),
+        ("olist_kpi", pa["olist_kpi"], f"{pa['olist_kpi'].get('headline_kpis')} indicateurs clés, {len(pa['olist_kpi'].get('sections', []))} découpages — vides={pa['olist_kpi'].get('checks_failed')}"),
         ("analyst", pa["analyst"], f"{pa['analyst'].get('insights')} insights ({pa['analyst'].get('generated_by')}), vérifiés={pa['analyst'].get('verified')}, alertes couvertes={pa['analyst'].get('alerts_covered')}"),
         ("dashboard", pa["dashboard"], f"{pa['dashboard'].get('charts')} graphiques, {pa['dashboard'].get('insights_displayed')} insights — contrôles échoués={pa['dashboard'].get('checks_failed')}"),
         ("auditor", pa["auditor"], f"passed={pa['auditor'].get('passed')} écarts={pa['auditor'].get('mismatches')} cause={pa['auditor'].get('cause')}"),
@@ -208,7 +230,9 @@ def run() -> dict:
     per_agent = {
         "profiler":  eval_profiler(load(SOURCES["profiler"]), load(SOURCES["profile"])),
         "etl":       eval_etl(load(SOURCES["etl_decision"]), load(SOURCES["etl_log"])),
-        "kpi":       eval_kpi(load(SOURCES["kpi"])),
+        "kpi":       eval_generic_kpi(load(SOURCES["kpi"])),
+        "olist_model": eval_etl(load(SOURCES["model"]), load(SOURCES["model_log"])),
+        "olist_kpi": eval_kpi(load(SOURCES["olist_kpi"])),
         "analyst":   eval_analyst(load(SOURCES["analyst"])),
         "dashboard": eval_dashboard(load(SOURCES["dashboard"])),
         "auditor":   eval_auditor(load(SOURCES["auditor"])),

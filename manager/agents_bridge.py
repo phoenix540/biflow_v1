@@ -1,7 +1,7 @@
 """Passerelle entre Olist Pilot et les agents du pipeline BIFlow.
 
 L'assistant ne refait pas le travail des agents : il les appelle.
-  - Agent KPI      : kpi_agent.filter_frames + kpi_agent.compute (mêmes formules que kpi_results.json)
+  - Agent KPI      : olist_kpi_agent.filter_frames + olist_kpi_agent.compute (mêmes formules que kpi_results.json)
   - BI Analyst     : analyst_agent.detect_* (signaux déterministes) sur les KPI du périmètre demandé,
                      + les insights rédigés et vérifiés publiés dans analyst_insights.json
   - XAI            : xai_engine.explain_kpi_change (décomposition prix / volume / mix de la variation du CA)
@@ -25,7 +25,7 @@ if str(AGENTS) not in sys.path:
     sys.path.insert(0, str(AGENTS))
 
 import analyst_agent as AA  # noqa: E402
-import kpi_agent as KA      # noqa: E402
+import olist_kpi_agent as KA  # noqa: E402
 import xai_engine as XE     # noqa: E402
 
 warnings.filterwarnings("ignore", message=".*fixed sampling defaults.*")

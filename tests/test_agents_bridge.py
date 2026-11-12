@@ -39,9 +39,9 @@ def test_chatbot_routes_to_agents_and_uses_dashboard_scope():
     store = M.load_store()
     sc = M.Scope("2018-01", "2018-08", ("RJ",))
     cases = {"Quelles sont les alertes ?": "BI Analyst", "Pourquoi le CA a baissé ?": "XAI",
-             "Pourquoi les clients donnent de mauvaises notes ?": "XAI", "Bonjour": "Agent KPI"}
+             "Pourquoi les clients donnent de mauvaises notes ?": "XAI", "Donne-moi un bilan": "Agent KPI"}
     for q, agent in cases.items():
         ans = A.ask(store, q, [], use_llm=False, scope=sc)
         assert agent in {t["agent"] for t in ans.trace}, q
-    kpi = A.ask(store, "Bonjour", [], use_llm=False, scope=sc)
+    kpi = A.ask(store, "Donne-moi un bilan", [], use_llm=False, scope=sc)
     assert "RJ" in kpi.text

@@ -11,7 +11,7 @@ from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
-from profiler import OUT_DIR, RAW_DIR, ROOT, category_translation_status, load_profile
+from profiler import OPTIONAL_COLUMNS, OUT_DIR, RAW_DIR, ROOT, category_translation_status, load_profile
 
 load_dotenv(ROOT / ".env")
 # Certains modèles Gemini ignorent "temperature" et le signalent à chaque appel : avertissement sans effet
@@ -372,6 +372,52 @@ def run_profiler_agent(max_steps: int = 18) -> dict:
             outputs.append(result)
             messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
     raise RuntimeError("L'agent n'a pas conclu dans le nombre d'étapes autorisé.")
+def rules_decision() -> dict:
+    """Décision déterministe (sans LLM) tirée du profil statistique : règles métier violées, relations
+    orphelines et colonnes très incomplètes deviennent des problèmes classés par gravité. Pas de traduction
+    proposée (c'est le rôle du LLM) : les catégories non traduites restent à valider dans l'application."""
+    profile = load_profile()
+    issues = []
+
+    def severity(pct):
+        return "high" if pct >= 10 else "medium" if pct >= 1 else "low"
+
+    for r in profile.get("business_rules", []):
+        if r.get("informative") or not r.get("violations"):
+            continue
+        issues.append({"table": r["table"], "column": None, "severity": severity(r.get("pct", 0)),
+                       "relevant_for_kpis": True, "diagnosis": r["rule"],
+                       "evidence": f"get_business_rule_results : {r['violations']} / {r['total']} ({r['pct']} %)",
+                       "action_for_etl": "corriger ou marquer les lignes concernées, sans les supprimer"})
+    for rel in profile.get("relations", []):
+        if rel.get("orphan_rows"):
+            t, c = rel["child"].split(".", 1)
+            issues.append({"table": t, "column": c, "severity": severity(rel["orphan_pct"]),
+                           "relevant_for_kpis": True, "diagnosis": f"valeurs absentes de {rel['parent']}",
+                           "evidence": f"get_relations_report : {rel['orphan_rows']} lignes orphelines "
+                                       f"({rel['orphan_distinct_values']} valeurs distinctes)",
+                           "action_for_etl": "conserver les lignes et signaler la jointure incomplète"})
+    for t, tp in profile.get("tables", {}).items():
+        for c, cp in tp.get("columns", {}).items():
+            if cp.get("missing_pct", 0) >= 20 and c not in OPTIONAL_COLUMNS:
+                issues.append({"table": t, "column": c, "severity": "medium", "relevant_for_kpis": False,
+                               "diagnosis": "colonne très incomplète",
+                               "evidence": f"get_column_profile : {cp['missing_pct']} % de valeurs manquantes",
+                               "action_for_etl": "ne pas imputer au-delà du seuil ; signaler la colonne"})
+    rank = {"high": 0, "medium": 1, "low": 2}
+    issues.sort(key=lambda i: rank[i["severity"]])
+    for k, i in enumerate(issues, 1):
+        i["id"] = f"I{k}"
+    score = profile.get("global_score") or 0
+    verdict = "yes" if score >= 80 else "partially" if score >= 40 else "no"
+    return {"generated_by": "règles (sans LLM)",
+            "summary": f"Profil statistique sans LLM : score de fiabilité {score} / 100, "
+                       f"{len(profile.get('tables', {}))} tables, {len(issues)} problème(s) relevé(s) par les règles.",
+            "fit_for_project": {"verdict": verdict, "reasoning": f"score de fiabilité global {score} / 100"},
+            "issues": issues, "etl_plan": [], "proposed_translations": [], "data_gaps": [],
+            "confidence": "medium", "trace": []}
+
+
 def decision_is_fresh(decision_file) -> bool:
     """Vrai si la décision existe et est plus récente que tous les CSV bruts."""
     if not decision_file.exists():
@@ -386,9 +432,14 @@ def run() -> dict:
 
     # --reuse : relit la dernière décision au lieu de rappeler le LLM (économise le quota),
     # SEULEMENT si elle est plus récente que les données brutes (sinon elle décrirait d'anciennes données)
-    if "--reuse" in sys.argv and decision_is_fresh(decision_file):
+    if ("--reuse" in sys.argv or "--no-llm" in sys.argv) and decision_is_fresh(decision_file):
         decision = json.loads(decision_file.read_text(encoding="utf-8"))
         reused = True
+    elif "--no-llm" in sys.argv or not os.environ.get("LLM_MODEL"):
+        print("  (Profiler sans LLM : décision déterministe tirée du profil statistique)")
+        decision = validate(rules_decision(), json.dumps(load_profile(), default=str))
+        write_agent_report(decision)
+        reused = False
     else:
         if "--reuse" in sys.argv:
             print("  (--reuse ignoré : les données brutes ont changé depuis la dernière décision)")

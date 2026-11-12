@@ -3,7 +3,7 @@ import pandas as pd
 
 import analyst_agent
 import auditor_agent
-import kpi_agent
+import olist_kpi_agent
 import orchestrator
 
 
@@ -22,7 +22,7 @@ def test_yoy_growth_only_between_reliable_months():
         "revenue_brl": [100.0, 150.0, 100.0, 300.0],
     })
     dates = _dates({"2017-03": True, "2018-03": True, "2017-04": False, "2018-04": True})
-    rows, summary, comparable = kpi_agent.monthly_trend(orders, dates)
+    rows, summary, comparable = olist_kpi_agent.monthly_trend(orders, dates)
     by_month = {r["month"]: r["yoy_growth_pct"] for r in rows}
     assert by_month["2018-03"] == 50.0
     assert by_month["2018-04"] is None            # 2017-04 peu fiable : pas de comparaison
@@ -33,7 +33,7 @@ def test_state_breakdown_rates():
     orders = pd.DataFrame({"order_id": ["a", "b"], "customer_state": ["SP", "SP"], "revenue_brl": [10.0, 30.0],
                            "late": [1.0, 0.0], "delivery_days": [5, 7], "freight_total": [2.0, 2.0],
                            "items_value": [10.0, 30.0], "review_score": [2, 4]})
-    s = kpi_agent.state_breakdown(orders)[0]
+    s = olist_kpi_agent.state_breakdown(orders)[0]
     assert (s["late_delivery_rate_pct"], s["median_delivery_days"], s["freight_to_revenue_pct"],
             s["avg_review_score"]) == (50.0, 6.0, 10.0, 3.0)
 
@@ -132,3 +132,15 @@ def test_audit_failure_follows_auditor_suggestion(monkeypatch):
     assert orchestrator.decide("auditor", step, {"audit_loops": 0}, {})["next"] == "retry_etl"
     step["result"]["suggested_rerun"] = "kpi"
     assert orchestrator.decide("auditor", step, {"audit_loops": 0}, {})["next"] == "retry_kpi"
+
+
+def test_non_olist_dataset_stops_after_generic_core():
+    step = {"status": "success", "result": {"ok": True, "applicable": False}}
+    d = orchestrator.decide("olist_model", step, {}, {})
+    assert d["next"] == "finish" and d["by"] == "rule"
+
+
+def test_pipeline_runs_generic_core_before_business_layer():
+    p = orchestrator.PIPELINE
+    assert p[:3] == ["profiler", "etl", "kpi"]
+    assert p.index("olist_model") < p.index("olist_kpi") < p.index("analyst") < p.index("auditor")
